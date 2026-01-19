@@ -65,7 +65,7 @@ function Train() {
         const result = await response.json();
         setStatus({ 
           type: 'success', 
-          message: `Success! Added ${result.chunks_generated} new chunks.` 
+          message: result.message || 'File uploaded successfully. You can now close this tab.'
         });
         setSelectedFile(null); 
       } else {

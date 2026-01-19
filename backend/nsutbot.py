@@ -1,6 +1,4 @@
 import os
-import faiss
-import pickle
 import time
 import shutil
 import uuid
@@ -15,7 +13,7 @@ from typing import List, Generator, Dict, Optional
 import uvicorn
 
 # --- Web Framework & API Imports ---
-from fastapi import FastAPI, Response, HTTPException, Request, status, UploadFile, File, Form, Depends
+from fastapi import FastAPI, Response, HTTPException, Request, status, UploadFile, File, Form, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -29,6 +27,9 @@ from PIL import Image, ImageDraw, ImageFont
 import pypdfium2 as pdfium
 from sentence_transformers import SentenceTransformer
 from groq import Groq
+
+# --- Pinecone Import ---
+from pinecone import Pinecone, ServerlessSpec
 
 # Try importing docx2pdf (Optional dependency)
 try:
@@ -46,6 +47,10 @@ app = FastAPI()
 # Credentials & URLs
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+
+if not PINECONE_API_KEY:
+    raise ValueError("Pinecone API key not found in environment variables.")
 
 # Models
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -54,14 +59,9 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DIMENSION = 384 
 
 # Directories
-DB_DIR = Path("vector_db")
-DB_DIR.mkdir(exist_ok=True)
+# (We no longer need DB_DIR for local vectors, but we keep UPLOAD_DIR)
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
-
-# File Paths
-INDEX_PATH = DB_DIR / "index.faiss"
-CHUNKS_PATH = DB_DIR / "chunks.pkl"
 
 # 2. CLIENT INITIALIZATION
 # ---------------------------------------------------------
@@ -88,16 +88,31 @@ def get_next_bot_client():
 
 embedder = SentenceTransformer(EMBEDDING_MODEL)
 
-# 3. DATABASE LOADING
+# 3. DATABASE INITIALIZATION (PINECONE)
 # ---------------------------------------------------------
-if INDEX_PATH.exists() and CHUNKS_PATH.exists():
-    index = faiss.read_index(str(INDEX_PATH))
-    with open(CHUNKS_PATH, "rb") as f:
-        chunks = pickle.load(f)
-    print(f"✅ Loaded {len(chunks)} chunks from disk.")
-else:
-    index = faiss.IndexFlatL2(DIMENSION)
-    chunks = []
+pc = Pinecone(api_key=PINECONE_API_KEY)
+INDEX_NAME = "nsutbot-index"
+
+# Check if index exists, if not create it
+existing_indexes = [index.name for index in pc.list_indexes()]
+
+if INDEX_NAME not in existing_indexes:
+    print(f"Creating Pinecone index: {INDEX_NAME}...")
+    pc.create_index(
+        name=INDEX_NAME,
+        dimension=DIMENSION,
+        metric="cosine",
+        spec=ServerlessSpec(
+            cloud="aws",
+            region="us-east-1"
+        )
+    )
+    # Wait a moment for index to be initialized
+    time.sleep(10)
+
+# Connect to the index
+index = pc.Index(INDEX_NAME)
+print(f"✅ Connected to Pinecone index: {INDEX_NAME}")
 
 # In-memory session store
 sessions = {}
@@ -114,7 +129,7 @@ app.add_middleware(
 
 # 5. SECURITY DEPENDENCY (THE GATEKEEPER)
 # ---------------------------------------------------------
-def get_current_user(request: Request):
+def get_current_user(request: Request,response: Response):
     """
     Checks if a valid session token exists in the cookie.
     If yes: Returns the user data.
@@ -135,7 +150,14 @@ def get_current_user(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Session expired"
         )
-        
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        httponly=True,
+        secure=False, 
+        samesite="lax",
+        max_age=604800 
+    )
     return sessions[token]
 
 # 6. DATA MODELS
@@ -157,11 +179,6 @@ def chunk_text(text: str, size: int = 500, overlap: int = 50) -> Generator[str, 
         return
     for i in range(0, len(words), size - overlap):
         yield " ".join(words[i:i + size])
-
-def save_db():
-    faiss.write_index(index, str(INDEX_PATH))
-    with open(CHUNKS_PATH, "wb") as f:
-        pickle.dump(chunks, f)
 
 def encode_image(pil_image):
     buffered = BytesIO()
@@ -215,6 +232,125 @@ def any_to_images(input_path: Path, output_dir: Path) -> List[Image.Image]:
         return [page.render(scale=3).to_pil() for page in pdf]
 
     raise ValueError(f"Unsupported file type: {ext}")
+def process_file_in_background(file_path: Path, filename: str, user_email: str):
+    """
+    Runs in the background AFTER the user gets a response.
+    Handles OCR, Chunking, Embedding, and Pinecone Upsert.
+    """
+    print(f"🔄 Background Task Started: Processing {filename} for {user_email}...")
+    
+    try:
+        # 1. Convert PDF/Doc to Images
+        try:
+            images = any_to_images(file_path, UPLOAD_DIR)
+        except Exception as e:
+            print(f"❌ Error converting file {filename}: {e}")
+            return
+
+        new_chunks_buffer = []
+
+        # 2. Extract Text from Each Page (OCR)
+        for i, img in enumerate(images):
+            current_bot = get_next_bot_client()
+            try:
+                base64_image = encode_image(img)
+                
+                # --- YOUR ORIGINAL PROMPT ---
+                prompt_text = r"""
+            You are an Advanced Technical Document Digitizer.
+            Your task is to transcribe this document page into perfect, structured Markdown.
+
+            ### CRITICAL INSTRUCTIONS:
+            
+            1. **MATHEMATICS & EQUATIONS (High Priority):**
+               - You must detect EVERY mathematical expression, no matter how small.
+               - Convert them strictly to LaTeX format.
+               - For inline math, use single $: e.g., $f(x) = x^2$
+               - For block math, use double $$: e.g., $$ \int_{0}^{\infty} e^{-x} dx $$
+               - Do not transliterate Greek letters (write $\alpha$, not alpha).
+
+            2. **STRUCTURAL ELEMENTS:**
+               - **Tables:** Recreate tables using Markdown syntax (| Col1 | Col2 |). Do not simplify them.
+               - **Headers:** Detect document hierarchy. Use # for Title, ## for Sections.
+               - **Code:** If you see code snippets, wrap them in triple backticks.
+
+            3. **DIAGRAMS & HANDWRITING:**
+               - If you see a flowchart, describe it or use Mermaid.js syntax if possible.
+               - If you see handwritten notes, transcribe them in *italics* with a [Handwritten] label.
+
+            4. **OUTPUT FORMAT:**
+               - Output ONLY the raw Markdown content.
+               - Do not add conversational fillers like "Here is the transcription".
+               - Do not wrap the output in a markdown block. Just return the text.
+            """
+
+                response = current_bot.chat.completions.create(
+                    model=GROQ_VISION_MODEL,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt_text},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                            ],
+                        }
+                    ],
+                    temperature=0.1,
+                    max_tokens=2048 
+                )
+                
+                page_text = response.choices[0].message.content
+                header = f"--- Source: {filename}, Page: {i+1} ---\n"
+                full_text = header + page_text
+                
+                for chunk in chunk_text(full_text):
+                    new_chunks_buffer.append(chunk)
+
+                # Rate limit protection
+                time.sleep(1.5) 
+
+            except Exception as e:
+                print(f"⚠️ Error extracting page {i+1} of {filename}: {e}")
+                if "429" in str(e):
+                    time.sleep(5)
+                    continue
+
+        if not new_chunks_buffer:
+            print(f"❌ Aborted: No text extracted from {filename}")
+            return
+
+        # 3. Embed & Upsert to Pinecone
+        print(f"⚡ Generating embeddings for {len(new_chunks_buffer)} chunks...")
+        embeddings = embedder.encode(new_chunks_buffer).tolist()
+
+        vectors_to_upsert = []
+        for chunk, emb in zip(new_chunks_buffer, embeddings):
+            vector_id = str(uuid.uuid4())
+            metadata = {
+                "text": chunk,
+                "filename": filename,
+                "user_email": user_email
+            }
+            vectors_to_upsert.append({
+                "id": vector_id,
+                "values": emb,
+                "metadata": metadata
+            })
+
+        # Batch Upsert (100 at a time)
+        batch_size = 100
+        for i in range(0, len(vectors_to_upsert), batch_size):
+            batch = vectors_to_upsert[i : i + batch_size]
+            index.upsert(vectors=batch)
+
+        print(f"✅ Success: {filename} is now live in the knowledge base!")
+
+    except Exception as e:
+        print(f"❌ CRITICAL BACKGROUND ERROR: {e}")
+    
+    
+    if file_path.exists():
+        os.remove(file_path)
 
 # 8. PUBLIC ENDPOINTS (No Check Needed)
 # ---------------------------------------------------------
@@ -283,117 +419,68 @@ async def logout(response: Response, request: Request, user: dict = Depends(get_
     return {"status": 200, "message": "Logged out"}
 
 @app.post("/train")
-async def train(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+async def train(
+    background_tasks: BackgroundTasks, 
+    file: UploadFile = File(...), 
+    user: dict = Depends(get_current_user)
+):
     original_filename = urllib.parse.unquote(file.filename)
     _, ext = os.path.splitext(original_filename)
-    # Save uploaded file
+    
+    # 1. Save uploaded file immediately
     safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename}_{user['email']}{ext}"
     file_path = UPLOAD_DIR / safe_name
     
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
-    try:
-        images = any_to_images(file_path, UPLOAD_DIR)
-    except Exception as e:
-        print(f"❌ CRITICAL ERROR during conversion: {e}")
-        raise HTTPException(400, f"Conversion failed: {str(e)}")
+    # 2. Add the heavy task to the background queue
+    background_tasks.add_task(process_file_in_background, file_path, file.filename, user['email'])
 
-    new_chunks_buffer = []
-
-    for i, img in enumerate(images):
-        current_bot = get_next_bot_client()
-        try:
-            base64_image = encode_image(img)
-            
-            # --- FULL, ELABORATIVE TRAINING PROMPT ---
-            prompt_text = r"""
-            You are an Advanced Technical Document Digitizer.
-            Your task is to transcribe this document page into perfect, structured Markdown.
-
-            ### CRITICAL INSTRUCTIONS:
-            
-            1. **MATHEMATICS & EQUATIONS (High Priority):**
-               - You must detect EVERY mathematical expression, no matter how small.
-               - Convert them strictly to LaTeX format.
-               - For inline math, use single $: e.g., $f(x) = x^2$
-               - For block math, use double $$: e.g., $$ \int_{0}^{\infty} e^{-x} dx $$
-               - Do not transliterate Greek letters (write $\alpha$, not alpha).
-
-            2. **STRUCTURAL ELEMENTS:**
-               - **Tables:** Recreate tables using Markdown syntax (| Col1 | Col2 |). Do not simplify them.
-               - **Headers:** Detect document hierarchy. Use # for Title, ## for Sections.
-               - **Code:** If you see code snippets, wrap them in triple backticks.
-
-            3. **DIAGRAMS & HANDWRITING:**
-               - If you see a flowchart, describe it or use Mermaid.js syntax if possible.
-               - If you see handwritten notes, transcribe them in *italics* with a [Handwritten] label.
-
-            4. **OUTPUT FORMAT:**
-               - Output ONLY the raw Markdown content.
-               - Do not add conversational fillers like "Here is the transcription".
-               - Do not wrap the output in a markdown block. Just return the text.
-            """
-
-            response = current_bot.chat.completions.create(
-                model=GROQ_VISION_MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_text},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                        ],
-                    }
-                ],
-                temperature=0.1,
-                max_tokens=2048 
-            )
-            
-            page_text = response.choices[0].message.content
-            header = f"--- Source: {file.filename}, Page: {i+1} ---\n"
-            full_text = header + page_text
-            
-            for chunk in chunk_text(full_text):
-                new_chunks_buffer.append(chunk)
-
-            time.sleep(1.5) 
-
-        except Exception as e:
-            print(f"Error extracting page {i+1}: {e}")
-            if "429" in str(e):
-                time.sleep(5)
-
-    if not new_chunks_buffer:
-        raise HTTPException(500, "No text extracted.")
-
-    embeddings = embedder.encode(new_chunks_buffer, convert_to_numpy=True).astype("float32")
-    index.add(embeddings)
-    chunks.extend(new_chunks_buffer)
-    save_db()
-
-    return {"status": "success", "filename": file.filename, "chunks_generated": len(new_chunks_buffer)}
+    # 3. Return "Success" immediately so user can close window
+    return {
+        "status": "success",
+        "message": "Upload successful! We are processing the file in the background. You can close this window now.",
+        "filename": file.filename
+    }
 
 @app.post("/send")
 async def send_message(
-    message: str = Form(...),
+    message: Optional[str] = Form(None), # 👈 Changed to Optional
     file: Optional[UploadFile] = File(None),
     user: dict = Depends(get_current_user)
 ):
+    if not message and not file:
+        raise HTTPException(status_code=400, detail="Please provide either a message or a file.")
+    if message is None:
+        message = ""
 
     # --- Everything below is your original logic ---
     user.setdefault("chats", [])
     user_chats = user.get("chats", [])
-    user["chats"].append({"role": "user", "content": message})
+    user["chats"].append({"role": "user", "content": message, "document": file.filename if file else None})
 
-    # RAG retrieval
-    if index.ntotal > 0:
-        q_emb = embedder.encode([message], convert_to_numpy=True).astype("float32")
-        D, I = index.search(q_emb, k=5)
-        retrieved_texts = [chunks[i] for i in I[0] if i < len(chunks)]
-        context_block = "\n\n".join(retrieved_texts)
-    else:
-        context_block = "No documents have been uploaded yet."
+    # RAG retrieval (PINECONE)
+    context_block = "No documents have been uploaded yet."
+    
+    # Generate query embedding
+    q_emb = embedder.encode([message]).tolist()[0]
+    
+    # Query Pinecone
+    try:
+        search_results = index.query(
+            vector=q_emb,
+            top_k=10,
+            include_metadata=True
+        )
+        
+        if search_results['matches']:
+            retrieved_texts = [match['metadata']['text'] for match in search_results['matches']]
+            context_block = "\n\n".join(retrieved_texts)
+            
+    except Exception as e:
+        print(f"Error querying Pinecone: {e}")
+        # Fallback to no context if DB fails
 
     # If file exists, read its content
     file_text = "No file attached"
@@ -429,7 +516,10 @@ async def send_message(
     - **Diagrams:** Use `mermaid` code blocks for processes.
     - **Tables:** Use Markdown tables.
     - **Visuals:** Insert 
-    [Image of X]
+    
+
+[Image of X]
+
     tags ONLY if specific physical structures (like circuits or anatomy) are discussed.
 
     ### 3. GUARDRAILS

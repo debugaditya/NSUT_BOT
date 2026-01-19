@@ -5,13 +5,13 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { 
-  Loader2, LogOut, Github, BrainCircuit, Bot, User, Menu, Plus, Send
+import {
+  Loader2, LogOut, Github, BrainCircuit, Bot, User, Menu, Plus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
 import './style.css';
-
+import { FileText } from 'lucide-react';
 const API_BASE = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 
 function DashboardPage() {
@@ -21,7 +21,7 @@ function DashboardPage() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  
+
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
@@ -42,11 +42,11 @@ function DashboardPage() {
   // --- AUTO-RESIZE LOGIC ---
   useEffect(() => {
     if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'; 
+      textareaRef.current.style.height = 'auto';
       if (input === '') {
-         textareaRef.current.style.height = '24px'; 
+        textareaRef.current.style.height = '24px';
       } else {
-         textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
       }
     }
   }, [input]);
@@ -93,12 +93,12 @@ function DashboardPage() {
     const currentInput = input;
     const currentFile = file;
 
-    setInput(''); 
+    setInput('');
     setFile(null);
     setSending(true);
 
     // 1. Add User Message. Last msg is now 'user', so DOTS APPEAR.
-    setMessages(prev => [...prev, { role: 'user', content: currentInput }]);
+    setMessages(prev => [...prev, { role: 'user', content: currentInput, document: currentFile ? currentFile.name : null }]);
 
     try {
       const formData = new FormData();
@@ -124,25 +124,25 @@ function DashboardPage() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         const chunk = decoder.decode(value, { stream: true });
         botContent += chunk;
 
         if (isFirstChunk) {
-            // 2. First text arrived! NOW we add the model message.
-            // This replaces the dots with the text bubble instantly.
-            isFirstChunk = false;
-            setMessages(prev => [...prev, { role: 'model', content: botContent }]);
+          // 2. First text arrived! NOW we add the model message.
+          // This replaces the dots with the text bubble instantly.
+          isFirstChunk = false;
+          setMessages(prev => [...prev, { role: 'model', content: botContent }]);
         } else {
-            // 3. Update the existing model message for subsequent chunks
-            setMessages(prev => {
-                const updated = [...prev];
-                const lastMsg = updated[updated.length - 1];
-                if (lastMsg && lastMsg.role === 'model') {
-                    lastMsg.content = botContent;
-                }
-                return updated;
-            });
+          // 3. Update the existing model message for subsequent chunks
+          setMessages(prev => {
+            const updated = [...prev];
+            const lastMsg = updated[updated.length - 1];
+            if (lastMsg && lastMsg.role === 'model') {
+              lastMsg.content = botContent;
+            }
+            return updated;
+          });
         }
       }
     } catch (error) {
@@ -202,7 +202,7 @@ function DashboardPage() {
             transition={{ duration: 0.2 }}
           >
             <div className="sidebar-header">
-              <BrainCircuit size={28} className="accent-text"/>
+              <BrainCircuit size={28} className="accent-text" />
               <h2>NSUT<span className="accent-text">Bot</span></h2>
             </div>
             <nav className="sidebar-nav">
@@ -227,7 +227,7 @@ function DashboardPage() {
 
       {/* Main Chat Area */}
       <main className="chat-area">
-        
+
         {/* Scrollable Messages Region */}
         <div className="messages-scroll-area">
           {messages.length === 0 ? (
@@ -243,10 +243,30 @@ function DashboardPage() {
                   <div className="avatar">
                     {msg.role === 'user' ? <User size={20} /> : <Bot size={30} />}
                   </div>
+
                   <div className="message-bubble">
-                    <ReactMarkdown 
-                      remarkPlugins={[remarkMath]} 
-                      rehypePlugins={[rehypeKatex]} 
+
+                    {/* 👇 NEW CODE: Display File Attachment Card */}
+                    {msg.document && (
+                      <div className="file-attachment" style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        marginBottom: '8px',
+                        padding: '8px',
+                        background: 'rgba(0, 0, 0, 0.2)', // Slightly darker background
+                        borderRadius: '6px',
+                        fontSize: '0.85rem'
+                      }}>
+                        <FileText size={16} />
+                        <span style={{ fontWeight: 500 }}>{msg.document}</span>
+                      </div>
+                    )}
+
+                    {/* Existing Markdown Content */}
+                    <ReactMarkdown
+                      remarkPlugins={[remarkMath]}
+                      rehypePlugins={[rehypeKatex]}
                       components={MarkdownComponents}
                     >
                       {preprocessLaTeX(msg.content)}
@@ -254,7 +274,7 @@ function DashboardPage() {
                   </div>
                 </div>
               ))}
-              
+
               {/* Typing Indicator */}
               {sending && messages[messages.length - 1]?.role === 'user' && (
                 <div className="message-wrapper model">
@@ -283,8 +303,8 @@ function DashboardPage() {
                 padding: "6px 12px", borderRadius: "99px", fontSize: "0.85rem"
               }}>
                 <span>📎 {file.name}</span>
-                <button 
-                  onClick={() => setFile(null)} 
+                <button
+                  onClick={() => setFile(null)}
                   style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", marginLeft: "4px" }}
                 >✕</button>
               </div>
@@ -292,16 +312,16 @@ function DashboardPage() {
           )}
 
           <div className="input-container">
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              style={{ display: "none" }} 
-              onChange={handleFileSelect} 
+            <input
+              type="file"
+              ref={fileInputRef}
+              style={{ display: "none" }}
+              onChange={handleFileSelect}
             />
-            
-            <button 
-              className="attach-btn" 
-              type="button" 
+
+            <button
+              className="attach-btn"
+              type="button"
               onClick={() => fileInputRef.current.click()}
               title="Attach file"
             >
