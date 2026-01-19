@@ -2,8 +2,6 @@ import os
 import time
 import shutil
 import uuid
-import subprocess
-import platform
 import base64
 import urllib.parse
 import secrets
@@ -11,6 +9,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import List, Generator, Dict, Optional
 import uvicorn
+from markitdown import MarkItDown
+
+# Initialize MarkItDown once
+md_converter = MarkItDown()
 
 # --- Web Framework & API Imports ---
 from fastapi import FastAPI, Response, HTTPException, Request, status, UploadFile, File, Form, Depends, BackgroundTasks
@@ -22,7 +24,6 @@ from pydantic import BaseModel
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 from dotenv import load_dotenv
-from pdf2image import convert_from_path
 from PIL import Image, ImageDraw, ImageFont
 import pypdfium2 as pdfium
 from sentence_transformers import SentenceTransformer
@@ -31,12 +32,6 @@ from groq import Groq
 # --- Pinecone Import ---
 from pinecone import Pinecone, ServerlessSpec
 
-# Try importing docx2pdf (Optional dependency)
-try:
-    from docx2pdf import convert as docx_convert
-    DOCX2PDF_AVAILABLE = True
-except ImportError:
-    DOCX2PDF_AVAILABLE = False
 
 # 1. SETUP & CONFIGURATION
 # ---------------------------------------------------------
@@ -209,23 +204,51 @@ def any_to_images(input_path: Path, output_dir: Path) -> List[Image.Image]:
             return []
 
     if ext == ".docx":
-        pdf_path = input_path.with_suffix(".pdf")
-        if DOCX2PDF_AVAILABLE and (platform.system() == "Windows" or platform.system() == "Darwin"):
+        try:
+            # Direct conversion to Markdown (No PDF or LibreOffice needed!)
+            result = md_converter.convert(str(input_path))
+            text_content = result.text_content
+            
+            # Create a high-resolution white canvas to "print" the text for the Vision model
+            img = Image.new("RGB", (1200, 1600), "white")
+            draw = ImageDraw.Draw(img)
+            
+            # Use a standard Linux font (DejaVu) or fallback to default
             try:
-                docx_convert(str(input_path), str(pdf_path))
-            except Exception:
-                pass
-        if not pdf_path.exists():
-            cmd = ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(output_dir), str(input_path)]
-            if os.name == 'nt': cmd[0] = "soffice"
-            subprocess.run(cmd, check=True)
-        input_path = pdf_path 
-
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+            except:
+                font = ImageFont.load_default()
+            
+            # Draw the first 5000 characters of the docx onto the image
+            draw.text((40, 40), text_content[:5000], fill="black", font=font)
+            return [img]
+            
+        except Exception as e:
+            print(f"❌ MarkItDown error on {input_path.name}: {e}")
+            return []
     if ext in [".pptx", ".ppt", ".xlsx", ".xls"]:
-        cmd = ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(output_dir), str(input_path)]
-        if os.name == 'nt': cmd[0] = "soffice"
-        subprocess.run(cmd, check=True)
-        input_path = input_path.with_suffix(".pdf")
+        try:
+            # MarkItDown handles these formats directly in Python
+            result = md_converter.convert(str(input_path))
+            text_content = result.text_content
+            
+            # Create a "virtual page" for your Vision AI to maintain your OCR pipeline
+            img = Image.new("RGB", (1200, 1600), "white")
+            draw = ImageDraw.Draw(img)
+            
+            try:
+                # Use a standard Linux font path
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+            except:
+                font = ImageFont.load_default()
+            
+            # Draw extracted text (Slides/Sheets) onto the image
+            draw.text((40, 40), text_content[:5000], fill="black", font=font)
+            return [img]
+
+        except Exception as e:
+            print(f"❌ Error processing Office file {input_path.name}: {e}")
+            return []
 
     if input_path.suffix.lower() == ".pdf":
         pdf = pdfium.PdfDocument(str(input_path))
@@ -564,4 +587,5 @@ async def send_message(
     return StreamingResponse(response_generator(), media_type="text/plain")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=3000)
+    port = int(os.environ.get("PORT", 3000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
