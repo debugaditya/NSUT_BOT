@@ -26,7 +26,6 @@ from google.auth.transport import requests as google_requests
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
 import pypdfium2 as pdfium
-from sentence_transformers import SentenceTransformer
 from groq import Groq
 
 # --- Pinecone Import ---
@@ -50,7 +49,7 @@ if not PINECONE_API_KEY:
 # Models
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_CHAT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "multilingual-e5-small"
 DIMENSION = 384 
 
 # Directories
@@ -182,6 +181,12 @@ def encode_image(pil_image):
     pil_image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
+def get_embeddings(texts):
+    return pc.inference.embed(
+        model="multilingual-e5-small",
+        inputs=texts,
+        parameters={"input_type": "passage"}
+    )
 def any_to_images(input_path: Path, output_dir: Path) -> List[Image.Image]:
     input_path = Path(input_path)
     ext = input_path.suffix.lower()
@@ -330,7 +335,8 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
                     new_chunks_buffer.append(chunk)
 
                 # Rate limit protection
-                time.sleep(1.5) 
+                time.sleep(1.5)
+                img.close() 
 
             except Exception as e:
                 print(f"⚠️ Error extracting page {i+1} of {filename}: {e}")
@@ -344,7 +350,8 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
 
         # 3. Embed & Upsert to Pinecone
         print(f"⚡ Generating embeddings for {len(new_chunks_buffer)} chunks...")
-        embeddings = embedder.encode(new_chunks_buffer).tolist()
+        embedding_response = get_embeddings(new_chunks_buffer)
+        embeddings = [item['values'] for item in embedding_response]
 
         vectors_to_upsert = []
         for chunk, emb in zip(new_chunks_buffer, embeddings):
@@ -487,7 +494,8 @@ async def send_message(
     context_block = "No documents have been uploaded yet."
     
     # Generate query embedding
-    q_emb = embedder.encode([message]).tolist()[0]
+    query_response = get_embeddings([message])
+    q_emb = query_response[0]['values']
     
     # Query Pinecone
     try:
