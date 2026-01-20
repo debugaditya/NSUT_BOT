@@ -50,7 +50,7 @@ if not PINECONE_API_KEY:
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_CHAT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EMBEDDING_MODEL = "llama-text-embed-v2"
-DIMENSION = 384 
+DIMENSION = 1024  # Dimension for Llama 2 embeddings
 
 # Directories
 # (We no longer need DB_DIR for local vectors, but we keep UPLOAD_DIR)
