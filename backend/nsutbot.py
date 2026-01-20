@@ -49,7 +49,7 @@ if not PINECONE_API_KEY:
 # Models
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_CHAT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-EMBEDDING_MODEL = "multilingual-e5-small"
+EMBEDDING_MODEL = "llama-text-embed-v2"
 DIMENSION = 384 
 
 # Directories
