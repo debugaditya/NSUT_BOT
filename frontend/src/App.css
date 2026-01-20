@@ -97,8 +97,13 @@ body, html, #root {
   width: 100%;
   display: flex;
   justify-content: center;
+  background: transparent !important;
+  align-items: center;
+  padding: 10px;
 }
-
+iframe[src^="https://accounts.google.com"] {
+  color-scheme: light;
+}
 /* --- Loading Spinner --- */
 .loading-container {
   display: flex;

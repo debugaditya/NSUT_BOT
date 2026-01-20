@@ -113,9 +113,13 @@ sessions = {}
 
 # 4. MIDDLEWARE
 # ---------------------------------------------------------
+origins = [
+    "https://nsut-bot.vercel.app",  # Your live Vercel frontend
+    "http://localhost:5173",       # Local development
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -148,9 +152,10 @@ def get_current_user(request: Request,response: Response):
         key="auth_token",
         value=token,
         httponly=True,
-        secure=False, 
-        samesite="lax",
-        max_age=604800 
+        secure=True, 
+        samesite="none",
+        max_age=604800,
+        path="/"
     )
     return sessions[token]
 
@@ -384,6 +389,13 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
 
 # 8. PUBLIC ENDPOINTS (No Check Needed)
 # ---------------------------------------------------------
+@app.get("/")
+async def root():
+    return {"status": "NSUT Bot Backend is Live"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
 @app.post("/login")
 async def login(data: LoginRequest, response: Response):
     try:
@@ -410,9 +422,10 @@ async def login(data: LoginRequest, response: Response):
             key="auth_token",
             value=session_token,
             httponly=True,
-            secure=False, 
-            samesite="lax",
-            max_age=604800 
+            secure=True, 
+            samesite="none",
+            max_age=604800,
+            path="/" 
         )
 
         return {"status": 200, "message": "Login successful", "token": session_token}
