@@ -389,11 +389,13 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
 
 # 8. PUBLIC ENDPOINTS (No Check Needed)
 # ---------------------------------------------------------
-@app.get("/")
+# 1. Update the Root Route
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"status": "NSUT Bot Backend is Live"}
 
-@app.get("/health")
+# 2. Update the Health Route
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "healthy"}
 @app.post("/login")
