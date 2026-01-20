@@ -188,7 +188,7 @@ def encode_image(pil_image):
 
 def get_embeddings(texts):
     return pc.inference.embed(
-        model="multilingual-e5-small",
+        model="llama-text-embed-v2",
         inputs=texts,
         parameters={"input_type": "passage"}
     )
