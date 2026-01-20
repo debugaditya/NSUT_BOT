@@ -80,7 +80,7 @@ def get_next_bot_client():
     current_bot_index = (current_bot_index + 1) % len(valid_bot_clients)
     return selected_bot
 
-embedder = SentenceTransformer(EMBEDDING_MODEL)
+
 
 # 3. DATABASE INITIALIZATION (PINECONE)
 # ---------------------------------------------------------
