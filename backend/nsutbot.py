@@ -495,8 +495,7 @@ async def send_message(
 ):
     if not message and not file:
         raise HTTPException(status_code=400, detail="Please provide either a message or a file.")
-    if message is None:
-        message = ""
+    msg_text = message.strip() if message else ""
 
     # --- Everything below is your original logic ---
     user.setdefault("chats", [])
@@ -507,25 +506,24 @@ async def send_message(
     context_block = "No documents have been uploaded yet."
     
     # Generate query embedding
-    query_response = get_embeddings([message])
-    q_emb = query_response[0]['values']
-    
-    # Query Pinecone
-    try:
-        search_results = index.query(
-            vector=q_emb,
-            top_k=10,
-            include_metadata=True
-        )
-        
-        if search_results['matches']:
-            retrieved_texts = [match['metadata']['text'] for match in search_results['matches']]
-            context_block = "\n\n".join(retrieved_texts)
+    if msg_text:
+        try:
+            # Generate query embedding only for non-empty text
+            query_response = get_embeddings([msg_text])
+            q_emb = query_response[0]['values']
             
-    except Exception as e:
-        print(f"Error querying Pinecone: {e}")
-        # Fallback to no context if DB fails
-
+            # Query Pinecone
+            search_results = index.query(
+                vector=q_emb,
+                top_k=10,
+                include_metadata=True
+            )
+            
+            if search_results['matches']:
+                retrieved_texts = [match['metadata']['text'] for match in search_results['matches']]
+                context_block = "\n\n".join(retrieved_texts)
+        except Exception as e:
+            print(f"Error during RAG retrieval: {e}")
     # If file exists, read its content
     file_text = "No file attached"
     if file:
