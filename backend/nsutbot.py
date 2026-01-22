@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Generator, Dict, Optional
 import uvicorn
 from markitdown import MarkItDown
+import gc
 
 # Initialize MarkItDown once
 md_converter = MarkItDown()
@@ -192,104 +193,52 @@ def get_embeddings(texts):
         inputs=texts,
         parameters={"input_type": "passage"}
     )
-def any_to_images(input_path: Path, output_dir: Path) -> List[Image.Image]:
+# Update any_to_images to be a Generator
+def any_to_images(input_path: Path) -> Generator[Image.Image, None, None]:
     input_path = Path(input_path)
     ext = input_path.suffix.lower()
     
     if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
-        return [Image.open(input_path)]
+        yield Image.open(input_path)
+        return
 
-    if ext in [".txt", ".md", ".csv", ".py", ".js", ".json"]:
-        try:
-            text = input_path.read_text(encoding="utf-8", errors="ignore")
-            img = Image.new("RGB", (1200, 1600), "white")
-            draw = ImageDraw.Draw(img)
-            try:
-                font = ImageFont.truetype("arial.ttf", 18)
-            except IOError:
-                font = ImageFont.load_default()
-            draw.text((20, 20), text[:4000], fill="black", font=font)
-            return [img]
-        except Exception:
-            return []
-
-    if ext == ".docx":
-        try:
-            # Direct conversion to Markdown (No PDF or LibreOffice needed!)
-            result = md_converter.convert(str(input_path))
-            text_content = result.text_content
-            
-            # Create a high-resolution white canvas to "print" the text for the Vision model
-            img = Image.new("RGB", (1200, 1600), "white")
-            draw = ImageDraw.Draw(img)
-            
-            # Use a standard Linux font (DejaVu) or fallback to default
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-            except:
-                font = ImageFont.load_default()
-            
-            # Draw the first 5000 characters of the docx onto the image
-            draw.text((40, 40), text_content[:5000], fill="black", font=font)
-            return [img]
-            
-        except Exception as e:
-            print(f"❌ MarkItDown error on {input_path.name}: {e}")
-            return []
-    if ext in [".pptx", ".ppt", ".xlsx", ".xls"]:
-        try:
-            # MarkItDown handles these formats directly in Python
-            result = md_converter.convert(str(input_path))
-            text_content = result.text_content
-            
-            # Create a "virtual page" for your Vision AI to maintain your OCR pipeline
-            img = Image.new("RGB", (1200, 1600), "white")
-            draw = ImageDraw.Draw(img)
-            
-            try:
-                # Use a standard Linux font path
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
-            except:
-                font = ImageFont.load_default()
-            
-            # Draw extracted text (Slides/Sheets) onto the image
-            draw.text((40, 40), text_content[:5000], fill="black", font=font)
-            return [img]
-
-        except Exception as e:
-            print(f"❌ Error processing Office file {input_path.name}: {e}")
-            return []
-
-    if input_path.suffix.lower() == ".pdf":
+    # For PDF, use a generator to yield one page at a time
+    if ext == ".pdf":
         pdf = pdfium.PdfDocument(str(input_path))
-        return [page.render(scale=3).to_pil() for page in pdf]
+        try:
+            for page in pdf:
+                # Render page, yield it
+                pil_image = page.render(scale=2).to_pil()
+                yield pil_image
+                # Explicitly clear the local PIL reference after yielding
+                del pil_image 
+        finally:
+            # This runs as soon as the generator is closed or finished
+            pdf.close()
+            print(f"🔒 PDF handle closed for {input_path.name}")
+        return
 
-    raise ValueError(f"Unsupported file type: {ext}")
+    # For Office files, use MarkItDown but limit text to avoid huge strings
+    if ext in [".docx", ".pptx", ".ppt", ".xlsx", ".xls", ".txt", ".md"]:
+        try:
+            result = md_converter.convert(str(input_path))
+            text_content = result.text_content
+            # Create a single "virtual" image from the text
+            img = Image.new("RGB", (1200, 1600), "white")
+            draw = ImageDraw.Draw(img)
+            draw.text((40, 40), text_content[:5000], fill="black")
+            yield img
+        except Exception as e:
+            print(f"❌ MarkItDown error: {e}")
 def process_file_in_background(file_path: Path, filename: str, user_email: str):
     """
-    Runs in the background AFTER the user gets a response.
-    Handles OCR, Chunking, Embedding, and Pinecone Upsert.
+    Runs in the background.
+    RAM-OPTIMIZED: Processes, embeds, and upserts ONE page at a time to save memory.
     """
     print(f"🔄 Background Task Started: Processing {filename} for {user_email}...")
     
-    try:
-        # 1. Convert PDF/Doc to Images
-        try:
-            images = any_to_images(file_path, UPLOAD_DIR)
-        except Exception as e:
-            print(f"❌ Error converting file {filename}: {e}")
-            return
-
-        new_chunks_buffer = []
-
-        # 2. Extract Text from Each Page (OCR)
-        for i, img in enumerate(images):
-            current_bot = get_next_bot_client()
-            try:
-                base64_image = encode_image(img)
-                
-                # --- YOUR ORIGINAL PROMPT ---
-                prompt_text = r"""
+    # --- YOUR ORIGINAL PROMPT ---
+    prompt_text = r"""
             You are an Advanced Technical Document Digitizer.
             Your task is to transcribe this document page into perfect, structured Markdown.
 
@@ -317,76 +266,59 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
                - Do not wrap the output in a markdown block. Just return the text.
             """
 
+    try:
+        # 'images' is now a generator, it DOES NOT load the whole file into RAM
+        images = any_to_images(file_path)
+
+        for i, img in enumerate(images):
+            current_bot = get_next_bot_client()
+            
+            try:
+                base64_image = encode_image(img)
+                
+                # Call AI... (Your existing chat completion code)
                 response = current_bot.chat.completions.create(
                     model=GROQ_VISION_MODEL,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt_text},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                            ],
-                        }
-                    ],
-                    temperature=0.1,
-                    max_tokens=2048 
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                        ],
+                    }],
+                    temperature=0.1
                 )
                 
                 page_text = response.choices[0].message.content
-                header = f"--- Source: {filename}, Page: {i+1} ---\n"
-                full_text = header + page_text
                 
-                for chunk in chunk_text(full_text):
-                    new_chunks_buffer.append(chunk)
+                # CHUNK AND UPSERT IMMEDIATELY (To keep buffers empty)
+                chunks = list(chunk_text(page_text))
+                if chunks:
+                    emb_res = get_embeddings(chunks)
+                    vectors = []
+                    for chunk, emb in zip(chunks, emb_res):
+                        vectors.append({
+                            "id": str(uuid.uuid4()),
+                            "values": emb['values'],
+                            "metadata": {"text": chunk, "filename": filename, "user_email": user_email}
+                        })
+                    index.upsert(vectors=vectors)
 
-                # Rate limit protection
-                time.sleep(1.5)
-                img.close() 
+                print(f"✅ Processed Page {i+1}")
 
-            except Exception as e:
-                print(f"⚠️ Error extracting page {i+1} of {filename}: {e}")
-                if "429" in str(e):
-                    time.sleep(5)
-                    continue
-
-        if not new_chunks_buffer:
-            print(f"❌ Aborted: No text extracted from {filename}")
-            return
-
-        # 3. Embed & Upsert to Pinecone
-        print(f"⚡ Generating embeddings for {len(new_chunks_buffer)} chunks...")
-        embedding_response = get_embeddings(new_chunks_buffer)
-        embeddings = [item['values'] for item in embedding_response]
-
-        vectors_to_upsert = []
-        for chunk, emb in zip(new_chunks_buffer, embeddings):
-            vector_id = str(uuid.uuid4())
-            metadata = {
-                "text": chunk,
-                "filename": filename,
-                "user_email": user_email
-            }
-            vectors_to_upsert.append({
-                "id": vector_id,
-                "values": emb,
-                "metadata": metadata
-            })
-
-        # Batch Upsert (100 at a time)
-        batch_size = 100
-        for i in range(0, len(vectors_to_upsert), batch_size):
-            batch = vectors_to_upsert[i : i + batch_size]
-            index.upsert(vectors=batch)
-
-        print(f"✅ Success: {filename} is now live in the knowledge base!")
-
+            finally:
+                # Manual memory management
+                if hasattr(img, 'close'): img.close()
+                del img
+                del base64_image
+                gc.collect() # Force clear RAM
+                print(f"🔄Processing completed of: {filename} for {user_email}...")
+                
+                
     except Exception as e:
-        print(f"❌ CRITICAL BACKGROUND ERROR: {e}")
-    
-    
-    if file_path.exists():
-        os.remove(file_path)
-
+        print(f"❌ CRITICAL ERROR: {e}")
+    finally:
+        if file_path.exists(): os.remove(file_path)
 # 8. PUBLIC ENDPOINTS (No Check Needed)
 # ---------------------------------------------------------
 # 1. Update the Root Route
