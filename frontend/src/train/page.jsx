@@ -68,7 +68,16 @@ function Train() {
           message: result.message || 'File uploaded successfully. You can now close this tab.'
         });
         setSelectedFile(null); 
-      } else {
+      } 
+      else if (response.status === 413) {
+        // Handle File Size Limit
+        setStatus({ 
+          type: 'error', 
+          message: 'File is too large! Please upload a file smaller than 10MB.' 
+        });
+        setSelectedFile(null);
+      }else {
+        setSelectedFile(null);
         throw new Error('Upload failed on server.');
       }
     } catch (error) {

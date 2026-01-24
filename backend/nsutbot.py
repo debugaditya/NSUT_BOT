@@ -11,6 +11,8 @@ from typing import List, Generator, Dict, Optional
 import uvicorn
 from markitdown import MarkItDown
 import gc
+import json # <--- ADDED
+import redis # <--- ADDED
 
 # Initialize MarkItDown once
 md_converter = MarkItDown()
@@ -20,6 +22,11 @@ from fastapi import FastAPI, Response, HTTPException, Request, status, UploadFil
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+# --- Rate Limiting Imports ---
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 # --- Auth & AI Imports ---
 from google.oauth2 import id_token
@@ -37,7 +44,43 @@ from pinecone import Pinecone, ServerlessSpec
 # ---------------------------------------------------------
 load_dotenv()
 
+# --- CONFIGURATION CONSTANTS ---
+MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# --- REDIS CLIENT SETUP (FOR SESSIONS) ---
+# We use a separate connection for session management
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+# decode_responses=True ensures we get Strings back, not Bytes
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+SESSION_TTL = 604800  # 7 Days in seconds
+
+# --- Rate Limiting Strategy for Render ---
+def get_render_user_ip(request: Request):
+    """
+    Safely retrieves the real user IP on Render.
+    Prioritizes 'True-Client-IP' (Cloudflare/Render standard).
+    """
+    real_ip = request.headers.get("True-Client-IP")
+    if not real_ip:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            real_ip = forwarded.split(",")[0].strip()
+        else:
+            real_ip = request.client.host
+    return real_ip
+
+# Initialize Limiter (Uses Redis if available, else Memory)
+limiter = Limiter(
+    key_func=get_render_user_ip,
+    storage_uri=os.getenv("REDIS_URL", "memory://")
+)
+
 app = FastAPI()
+
+# Attach Limiter to App
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Credentials & URLs
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -54,7 +97,6 @@ EMBEDDING_MODEL = "llama-text-embed-v2"
 DIMENSION = 1024  # Dimension for Llama 2 embeddings
 
 # Directories
-# (We no longer need DB_DIR for local vectors, but we keep UPLOAD_DIR)
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -82,7 +124,6 @@ def get_next_bot_client():
     return selected_bot
 
 
-
 # 3. DATABASE INITIALIZATION (PINECONE)
 # ---------------------------------------------------------
 pc = Pinecone(api_key=PINECONE_API_KEY)
@@ -102,15 +143,13 @@ if INDEX_NAME not in existing_indexes:
             region="us-east-1"
         )
     )
-    # Wait a moment for index to be initialized
     time.sleep(10)
 
 # Connect to the index
 index = pc.Index(INDEX_NAME)
 print(f"✅ Connected to Pinecone index: {INDEX_NAME}")
 
-# In-memory session store
-sessions = {}
+# REMOVED: In-memory session store (sessions = {})
 
 # 4. MIDDLEWARE
 # ---------------------------------------------------------
@@ -128,7 +167,7 @@ app.add_middleware(
 
 # 5. SECURITY DEPENDENCY (THE GATEKEEPER)
 # ---------------------------------------------------------
-def get_current_user(request: Request,response: Response):
+def get_current_user(request: Request, response: Response):
     """
     Checks if a valid session token exists in the cookie.
     If yes: Returns the user data.
@@ -137,18 +176,21 @@ def get_current_user(request: Request,response: Response):
     token = request.cookies.get("auth_token")
     
     if not token:
-        # No cookie found
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Authentication required"
         )
     
-    if token not in sessions:
-        # Cookie exists but is invalid/expired (server restarted)
+    # --- REDIS CHANGE ---
+    user_data_json = redis_client.get(token)
+    
+    if not user_data_json:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Session expired"
         )
+    
+    # Refresh Cookie
     response.set_cookie(
         key="auth_token",
         value=token,
@@ -158,7 +200,8 @@ def get_current_user(request: Request,response: Response):
         max_age=604800,
         path="/"
     )
-    return sessions[token]
+    
+    return json.loads(user_data_json) # Deserialize JSON string to Dict
 
 # 6. DATA MODELS
 # ---------------------------------------------------------
@@ -193,7 +236,7 @@ def get_embeddings(texts):
         inputs=texts,
         parameters={"input_type": "passage"}
     )
-# Update any_to_images to be a Generator
+
 def any_to_images(input_path: Path) -> Generator[Image.Image, None, None]:
     input_path = Path(input_path)
     ext = input_path.suffix.lower()
@@ -207,13 +250,10 @@ def any_to_images(input_path: Path) -> Generator[Image.Image, None, None]:
         pdf = pdfium.PdfDocument(str(input_path))
         try:
             for page in pdf:
-                # Render page, yield it
                 pil_image = page.render(scale=2).to_pil()
                 yield pil_image
-                # Explicitly clear the local PIL reference after yielding
                 del pil_image 
         finally:
-            # This runs as soon as the generator is closed or finished
             pdf.close()
             print(f"🔒 PDF handle closed for {input_path.name}")
         return
@@ -223,13 +263,13 @@ def any_to_images(input_path: Path) -> Generator[Image.Image, None, None]:
         try:
             result = md_converter.convert(str(input_path))
             text_content = result.text_content
-            # Create a single "virtual" image from the text
             img = Image.new("RGB", (1200, 1600), "white")
             draw = ImageDraw.Draw(img)
             draw.text((40, 40), text_content[:5000], fill="black")
             yield img
         except Exception as e:
             print(f"❌ MarkItDown error: {e}")
+
 def process_file_in_background(file_path: Path, filename: str, user_email: str):
     """
     Runs in the background.
@@ -237,7 +277,6 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
     """
     print(f"🔄 Background Task Started: Processing {filename} for {user_email}...")
     
-    # --- YOUR ORIGINAL PROMPT ---
     prompt_text = r"""
             You are an Advanced Technical Document Digitizer.
             Your task is to transcribe this document page into perfect, structured Markdown.
@@ -267,7 +306,6 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
             """
 
     try:
-        # 'images' is now a generator, it DOES NOT load the whole file into RAM
         images = any_to_images(file_path)
 
         for i, img in enumerate(images):
@@ -276,7 +314,6 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
             try:
                 base64_image = encode_image(img)
                 
-                # Call AI... (Your existing chat completion code)
                 response = current_bot.chat.completions.create(
                     model=GROQ_VISION_MODEL,
                     messages=[{
@@ -291,7 +328,6 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
                 
                 page_text = response.choices[0].message.content
                 
-                # CHUNK AND UPSERT IMMEDIATELY (To keep buffers empty)
                 chunks = list(chunk_text(page_text))
                 if chunks:
                     emb_res = get_embeddings(chunks)
@@ -307,33 +343,32 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
                 print(f"✅ Processed Page {i+1}")
 
             finally:
-                # Manual memory management
                 if hasattr(img, 'close'): img.close()
                 del img
                 del base64_image
-                gc.collect() # Force clear RAM
-                print(f"🔄Processing completed of: {filename} for {user_email}...")
+                gc.collect() 
                 
+        print(f"🔄Processing completed of: {filename} for {user_email}...")
                 
     except Exception as e:
         print(f"❌ CRITICAL ERROR: {e}")
     finally:
         if file_path.exists(): os.remove(file_path)
-# 8. PUBLIC ENDPOINTS (No Check Needed)
+
+# 8. PUBLIC ENDPOINTS
 # ---------------------------------------------------------
-# 1. Update the Root Route
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"status": "NSUT Bot Backend is Live"}
 
-# 2. Update the Health Route
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "healthy"}
+
 @app.post("/login")
-async def login(data: LoginRequest, response: Response):
+@limiter.limit("5/minute")  # BRUTE FORCE PROTECTION
+async def login(request: Request, data: LoginRequest, response: Response):
     try:
-        # 1. Verify Google Token
         id_info = id_token.verify_oauth2_token(
             data.token, 
             google_requests.Request(), 
@@ -343,14 +378,15 @@ async def login(data: LoginRequest, response: Response):
         email = id_info.get("email")
         name = id_info.get("name")
 
-        # 2. Check NSUT Domain (Make sure this is UNCOMMENTED)
         if not email.endswith("@nsut.ac.in"):
-            # This raises a 402 error
             raise HTTPException(status_code=402, detail="Sign in with NSUT mail ID")
 
-        # 3. Create Session
         session_token = secrets.token_urlsafe(32)
-        sessions[session_token] = {"email": email, "name": name,"chats": []}
+        
+        # --- REDIS CHANGE ---
+        # Serialize user data to JSON
+        user_data = {"email": email, "name": name, "chats": []}
+        redis_client.setex(session_token, SESSION_TTL, json.dumps(user_data))
 
         response.set_cookie(
             key="auth_token",
@@ -364,66 +400,87 @@ async def login(data: LoginRequest, response: Response):
 
         return {"status": 200, "message": "Login successful", "token": session_token}
 
-    # 👇 THIS IS THE NEW PART
     except HTTPException as e:
-        # If the error is an HTTPException (like our 402), let it pass through!
         raise e 
-        
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid Google Token")
-        
     except Exception as e:
-        # This only catches unexpected crashes now
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# 9. PROTECTED ENDPOINTS (Using `Depends(get_current_user)`)
+# 9. PROTECTED ENDPOINTS
 # ---------------------------------------------------------
 
 @app.get("/verify")
 async def verify(user: dict = Depends(get_current_user)):
-    # If code reaches here, user is guaranteed to be valid
     print(f"DEBUG: User verified: {user['email']}")
     return {"status": 200, "email": user["email"], "name": user["name"], "chats": user["chats"]}
 
 @app.get("/logout")
 async def logout(response: Response, request: Request, user: dict = Depends(get_current_user)):
     token = request.cookies.get("auth_token")
-    if token and token in sessions:
-        del sessions[token]
+    if token:
+        redis_client.delete(token) # --- REDIS CHANGE ---
     
     response.delete_cookie("auth_token")
     return {"status": 200, "message": "Logged out"}
 
 @app.post("/train")
+@limiter.limit("10/minute")  # RESOURCE PROTECTION
 async def train(
+    request: Request,
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...), 
     user: dict = Depends(get_current_user)
 ):
+    # --- 1. FILE SIZE CHECK ---
+    # Check Content-Length header first for speed
+    content_length = request.headers.get('content-length')
+    if content_length and int(content_length) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413, 
+            detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."
+        )
+
+    # --- 2. LOGIC ---
     original_filename = urllib.parse.unquote(file.filename)
     _, ext = os.path.splitext(original_filename)
     
-    # 1. Save uploaded file immediately
     safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename}_{user['email']}{ext}"
     file_path = UPLOAD_DIR / safe_name
     
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # Save file
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        # Double check size after saving (to be 100% sure)
+        if file_path.stat().st_size > MAX_FILE_SIZE_BYTES:
+            os.remove(file_path)
+            raise HTTPException(
+                status_code=413, 
+                detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."
+            )
+            
+    except Exception as e:
+        if file_path.exists(): os.remove(file_path)
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=f"Upload error: {str(e)}")
     
-    # 2. Add the heavy task to the background queue
+    # Add background task
     background_tasks.add_task(process_file_in_background, file_path, file.filename, user['email'])
 
-    # 3. Return "Success" immediately so user can close window
     return {
         "status": "success",
-        "message": "Upload successful! We are processing the file in the background. You can close this window now.",
+        "message": "Upload successful! Processing in background.",
         "filename": file.filename
     }
 
 @app.post("/send")
+@limiter.limit("60/minute")  # CHAT PROTECTION
 async def send_message(
-    message: Optional[str] = Form(None), # 👈 Changed to Optional
+    request: Request,
+    message: Optional[str] = Form(None), 
     file: Optional[UploadFile] = File(None),
     user: dict = Depends(get_current_user)
 ):
@@ -431,22 +488,23 @@ async def send_message(
         raise HTTPException(status_code=400, detail="Please provide either a message or a file.")
     msg_text = message.strip() if message else ""
 
-    # --- Everything below is your original logic ---
     user.setdefault("chats", [])
     user_chats = user.get("chats", [])
     user["chats"].append({"role": "user", "content": message, "document": file.filename if file else None})
 
+    # --- REDIS CHANGE: WRITE BACK USER MSG ---
+    token = request.cookies.get("auth_token")
+    if token:
+        redis_client.setex(token, SESSION_TTL, json.dumps(user))
+
     # RAG retrieval (PINECONE)
     context_block = "No documents have been uploaded yet."
     
-    # Generate query embedding
     if msg_text:
         try:
-            # Generate query embedding only for non-empty text
             query_response = get_embeddings([msg_text])
             q_emb = query_response[0]['values']
             
-            # Query Pinecone
             search_results = index.query(
                 vector=q_emb,
                 top_k=10,
@@ -458,14 +516,12 @@ async def send_message(
                 context_block = "\n\n".join(retrieved_texts)
         except Exception as e:
             print(f"Error during RAG retrieval: {e}")
-    # If file exists, read its content
+
     file_text = "No file attached"
     if file:
         contents = await file.read()
         file_text = f"Filename: {file.filename}, Size: {len(contents)} bytes"
-        # later you can plug in PDF/TXT parsing here
 
-    # --- Your system prompt unchanged ---
     system_prompt = r"""
     You are an expert Academic Teaching Assistant at NSUT.
     You are basically a RAG (Retrieval-Augmented Generation) bot. TRAINED ON NSUT DOCUMENTS ONLY.
@@ -493,8 +549,10 @@ async def send_message(
     - **Tables:** Use Markdown tables.
     - **Visuals:** Insert 
     
+    
 
 [Image of X]
+
 
     tags ONLY if specific physical structures (like circuits or anatomy) are discussed.
 
@@ -535,7 +593,13 @@ async def send_message(
             if content:
                 full_response += content
                 yield content
+        
+        # --- REDIS CHANGE: WRITE BACK ASSISTANT MSG ---
+        # Unlike dicts, we must manually update Redis
         user["chats"].append({"role": "assistant", "content": full_response})
+        # We need the token again to save. We can grab it from scope.
+        if token:
+            redis_client.setex(token, SESSION_TTL, json.dumps(user))
 
     return StreamingResponse(response_generator(), media_type="text/plain")
 
