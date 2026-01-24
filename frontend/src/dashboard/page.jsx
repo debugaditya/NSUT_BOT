@@ -6,12 +6,13 @@ import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import {
-  Loader2, LogOut, Github, BrainCircuit, Bot, User, Menu, Plus
+  Loader2, LogOut, Github, BrainCircuit, Bot, User, Menu, Plus, 
+  AlertCircle, CheckCircle, FileText // <--- Added AlertCircle & CheckCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
 import './style.css';
-import { FileText } from 'lucide-react';
+
 const API_BASE = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
 
 function DashboardPage() {
@@ -21,6 +22,9 @@ function DashboardPage() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  
+  // --- NEW: Status State for Error Messages ---
+  const [status, setStatus] = useState({ message: '', type: '' });
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -39,7 +43,6 @@ function DashboardPage() {
     if (sending) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, sending]);
 
-  // --- AUTO-RESIZE LOGIC ---
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -50,6 +53,12 @@ function DashboardPage() {
       }
     }
   }, [input]);
+
+  // --- Helper to clear status automatically ---
+  const showStatus = (msg, type) => {
+    setStatus({ message: msg, type: type });
+    setTimeout(() => setStatus({ message: '', type: '' }), 4000); // Hide after 4s
+  };
 
   const preprocessLaTeX = (content) => {
     if (!content) return "";
@@ -77,7 +86,10 @@ function DashboardPage() {
   }
 
   function handleFileSelect(e) {
-    if (e.target.files[0]) setFile(e.target.files[0]);
+    if (e.target.files[0]) {
+        setFile(e.target.files[0]);
+        setStatus({ message: '', type: '' }); // Clear any previous errors
+    }
   }
 
   async function deleteCookies() {
@@ -96,8 +108,9 @@ function DashboardPage() {
     setInput('');
     setFile(null);
     setSending(true);
+    setStatus({ message: '', type: '' }); // Clear previous errors
 
-    // 1. Add User Message. Last msg is now 'user', so DOTS APPEAR.
+    // Optimistic UI Update
     setMessages(prev => [...prev, { role: 'user', content: currentInput, document: currentFile ? currentFile.name : null }]);
 
     try {
@@ -111,15 +124,23 @@ function DashboardPage() {
         body: formData,
       });
 
+      // --- NEW: Handle 413 File Too Large specifically ---
+      if (response.status === 413) {
+        showStatus("File too large. Maximum size is 10MB.", "error");
+        
+        // Optional: Remove the failed message from UI or mark it as failed
+        // For now, we just stop the loading spinner
+        setSending(false); 
+        return; 
+      }
+      
+      if (!response.ok) throw new Error("Network response was not ok");
       if (!response.body) throw new Error("No response body");
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let botContent = '';
-      let isFirstChunk = true; // <--- Flag to track the first piece of text
-
-      // ❌ REMOVED: setMessages(prev => [...prev, { role: 'model', content: '' }]);
-      // We do NOT add the empty bubble here. We wait for text.
+      let isFirstChunk = true;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -129,12 +150,9 @@ function DashboardPage() {
         botContent += chunk;
 
         if (isFirstChunk) {
-          // 2. First text arrived! NOW we add the model message.
-          // This replaces the dots with the text bubble instantly.
           isFirstChunk = false;
           setMessages(prev => [...prev, { role: 'model', content: botContent }]);
         } else {
-          // 3. Update the existing model message for subsequent chunks
           setMessages(prev => {
             const updated = [...prev];
             const lastMsg = updated[updated.length - 1];
@@ -147,7 +165,10 @@ function DashboardPage() {
       }
     } catch (error) {
       console.error("Streaming error:", error);
-      setMessages(prev => [...prev, { role: 'model', content: '**Error:** Connection failed.' }]);
+      // Only show error bubble if it wasn't a handled UI error (like 413)
+      if (status.type !== 'error') {
+          setMessages(prev => [...prev, { role: 'model', content: '**Error:** Connection failed.' }]);
+      }
     } finally {
       setSending(false);
     }
@@ -245,25 +266,16 @@ function DashboardPage() {
                   </div>
 
                   <div className="message-bubble">
-
-                    {/* 👇 NEW CODE: Display File Attachment Card */}
                     {msg.document && (
                       <div className="file-attachment" style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        marginBottom: '8px',
-                        padding: '8px',
-                        background: 'rgba(0, 0, 0, 0.2)', // Slightly darker background
-                        borderRadius: '6px',
-                        fontSize: '0.85rem'
+                        display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px',
+                        padding: '8px', background: 'rgba(0, 0, 0, 0.2)', borderRadius: '6px', fontSize: '0.85rem'
                       }}>
                         <FileText size={16} />
                         <span style={{ fontWeight: 500 }}>{msg.document}</span>
                       </div>
                     )}
 
-                    {/* Existing Markdown Content */}
                     <ReactMarkdown
                       remarkPlugins={[remarkMath]}
                       rehypePlugins={[rehypeKatex]}
@@ -275,7 +287,6 @@ function DashboardPage() {
                 </div>
               ))}
 
-              {/* Typing Indicator */}
               {sending && messages[messages.length - 1]?.role === 'user' && (
                 <div className="message-wrapper model">
                   <div className="avatar"><Bot size={30} /></div>
@@ -295,6 +306,23 @@ function DashboardPage() {
 
         {/* Input Region - Fixed to Bottom */}
         <div className="input-area">
+          
+          {/* --- NEW: Floating Error Message Animation --- */}
+          <AnimatePresence>
+            {status.message && (
+              <motion.div 
+                initial={{ opacity: 0, y: 10, height: 0 }}
+                animate={{ opacity: 1, y: 0, height: 'auto' }}
+                exit={{ opacity: 0, y: 10, height: 0 }}
+                style={{ marginBottom: '10px' }}
+                className={`status-message ${status.type}`} // Make sure you have .error css in style.css
+              >
+                {status.type === 'success' ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
+                <span>{status.message}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {file && (
             <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.5rem' }}>
               <div style={{

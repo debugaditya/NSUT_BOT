@@ -11,8 +11,8 @@ from typing import List, Generator, Dict, Optional
 import uvicorn
 from markitdown import MarkItDown
 import gc
-import json # <--- ADDED
-import redis # <--- ADDED
+import json
+import redis
 
 # Initialize MarkItDown once
 md_converter = MarkItDown()
@@ -49,18 +49,12 @@ MAX_FILE_SIZE_MB = 10
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # --- REDIS CLIENT SETUP (FOR SESSIONS) ---
-# We use a separate connection for session management
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-# decode_responses=True ensures we get Strings back, not Bytes
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 SESSION_TTL = 604800  # 7 Days in seconds
 
 # --- Rate Limiting Strategy for Render ---
 def get_render_user_ip(request: Request):
-    """
-    Safely retrieves the real user IP on Render.
-    Prioritizes 'True-Client-IP' (Cloudflare/Render standard).
-    """
     real_ip = request.headers.get("True-Client-IP")
     if not real_ip:
         forwarded = request.headers.get("X-Forwarded-For")
@@ -70,7 +64,7 @@ def get_render_user_ip(request: Request):
             real_ip = request.client.host
     return real_ip
 
-# Initialize Limiter (Uses Redis if available, else Memory)
+# Initialize Limiter
 limiter = Limiter(
     key_func=get_render_user_ip,
     storage_uri=os.getenv("REDIS_URL", "memory://")
@@ -94,7 +88,7 @@ if not PINECONE_API_KEY:
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_CHAT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 EMBEDDING_MODEL = "llama-text-embed-v2"
-DIMENSION = 1024  # Dimension for Llama 2 embeddings
+DIMENSION = 1024 
 
 # Directories
 UPLOAD_DIR = Path("uploads")
@@ -129,7 +123,6 @@ def get_next_bot_client():
 pc = Pinecone(api_key=PINECONE_API_KEY)
 INDEX_NAME = "nsutbot-index"
 
-# Check if index exists, if not create it
 existing_indexes = [index.name for index in pc.list_indexes()]
 
 if INDEX_NAME not in existing_indexes:
@@ -138,24 +131,18 @@ if INDEX_NAME not in existing_indexes:
         name=INDEX_NAME,
         dimension=DIMENSION,
         metric="cosine",
-        spec=ServerlessSpec(
-            cloud="aws",
-            region="us-east-1"
-        )
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
     time.sleep(10)
 
-# Connect to the index
 index = pc.Index(INDEX_NAME)
 print(f"✅ Connected to Pinecone index: {INDEX_NAME}")
-
-# REMOVED: In-memory session store (sessions = {})
 
 # 4. MIDDLEWARE
 # ---------------------------------------------------------
 origins = [
-    "https://nsut-bot.vercel.app",  # Your live Vercel frontend
-    "http://localhost:5173",       # Local development
+    "https://nsut-bot.vercel.app",
+    "http://localhost:5173",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -165,43 +152,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 5. SECURITY DEPENDENCY (THE GATEKEEPER)
+# 5. SECURITY DEPENDENCY
 # ---------------------------------------------------------
 def get_current_user(request: Request, response: Response):
-    """
-    Checks if a valid session token exists in the cookie.
-    If yes: Returns the user data.
-    If no: Raises a 401 error immediately (Stopping the request).
-    """
     token = request.cookies.get("auth_token")
-    
     if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Authentication required"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     
-    # --- REDIS CHANGE ---
     user_data_json = redis_client.get(token)
-    
     if not user_data_json:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Session expired"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
     
-    # Refresh Cookie
     response.set_cookie(
-        key="auth_token",
-        value=token,
-        httponly=True,
-        secure=True, 
-        samesite="none",
-        max_age=604800,
-        path="/"
+        key="auth_token", value=token, httponly=True, secure=True, 
+        samesite="none", max_age=604800, path="/"
     )
-    
-    return json.loads(user_data_json) # Deserialize JSON string to Dict
+    return json.loads(user_data_json)
 
 # 6. DATA MODELS
 # ---------------------------------------------------------
@@ -245,7 +211,7 @@ def any_to_images(input_path: Path) -> Generator[Image.Image, None, None]:
         yield Image.open(input_path)
         return
 
-    # For PDF, use a generator to yield one page at a time
+    # PDF Processing
     if ext == ".pdf":
         pdf = pdfium.PdfDocument(str(input_path))
         try:
@@ -255,28 +221,29 @@ def any_to_images(input_path: Path) -> Generator[Image.Image, None, None]:
                 del pil_image 
         finally:
             pdf.close()
-            print(f"🔒 PDF handle closed for {input_path.name}")
         return
 
-    # For Office files, use MarkItDown but limit text to avoid huge strings
+    # Office/Text Processing
     if ext in [".docx", ".pptx", ".ppt", ".xlsx", ".xls", ".txt", ".md"]:
         try:
             result = md_converter.convert(str(input_path))
             text_content = result.text_content
+            # Convert text to a simple image
             img = Image.new("RGB", (1200, 1600), "white")
             draw = ImageDraw.Draw(img)
-            draw.text((40, 40), text_content[:5000], fill="black")
+            # Use default font or load one if available. Default is machine dependent but works for basic text.
+            try:
+                font = ImageFont.truetype("arial.ttf", 20)
+            except:
+                font = ImageFont.load_default()
+                
+            draw.text((40, 40), text_content[:5000], fill="black", font=font)
             yield img
         except Exception as e:
             print(f"❌ MarkItDown error: {e}")
 
 def process_file_in_background(file_path: Path, filename: str, user_email: str):
-    """
-    Runs in the background.
-    RAM-OPTIMIZED: Processes, embeds, and upserts ONE page at a time to save memory.
-    """
-    print(f"🔄 Background Task Started: Processing {filename} for {user_email}...")
-    
+    # (Background Training Logic - Unchanged)
     prompt_text = r"""
             You are an Advanced Technical Document Digitizer.
             Your task is to transcribe this document page into perfect, structured Markdown.
@@ -304,16 +271,12 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
                - Do not add conversational fillers like "Here is the transcription".
                - Do not wrap the output in a markdown block. Just return the text.
             """
-
     try:
         images = any_to_images(file_path)
-
         for i, img in enumerate(images):
             current_bot = get_next_bot_client()
-            
             try:
                 base64_image = encode_image(img)
-                
                 response = current_bot.chat.completions.create(
                     model=GROQ_VISION_MODEL,
                     messages=[{
@@ -325,9 +288,7 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
                     }],
                     temperature=0.1
                 )
-                
                 page_text = response.choices[0].message.content
-                
                 chunks = list(chunk_text(page_text))
                 if chunks:
                     emb_res = get_embeddings(chunks)
@@ -339,17 +300,11 @@ def process_file_in_background(file_path: Path, filename: str, user_email: str):
                             "metadata": {"text": chunk, "filename": filename, "user_email": user_email}
                         })
                     index.upsert(vectors=vectors)
-
-                print(f"✅ Processed Page {i+1}")
-
             finally:
                 if hasattr(img, 'close'): img.close()
                 del img
                 del base64_image
                 gc.collect() 
-                
-        print(f"🔄Processing completed of: {filename} for {user_email}...")
-                
     except Exception as e:
         print(f"❌ CRITICAL ERROR: {e}")
     finally:
@@ -366,162 +321,192 @@ async def health():
     return {"status": "healthy"}
 
 @app.post("/login")
-@limiter.limit("5/minute")  # BRUTE FORCE PROTECTION
+@limiter.limit("5/minute")
 async def login(request: Request, data: LoginRequest, response: Response):
     try:
-        id_info = id_token.verify_oauth2_token(
-            data.token, 
-            google_requests.Request(), 
-            GOOGLE_CLIENT_ID
-        )
-
+        id_info = id_token.verify_oauth2_token(data.token, google_requests.Request(), GOOGLE_CLIENT_ID)
         email = id_info.get("email")
         name = id_info.get("name")
-
         if not email.endswith("@nsut.ac.in"):
             raise HTTPException(status_code=402, detail="Sign in with NSUT mail ID")
-
-        session_token = secrets.token_urlsafe(32)
         
-        # --- REDIS CHANGE ---
-        # Serialize user data to JSON
+        session_token = secrets.token_urlsafe(32)
         user_data = {"email": email, "name": name, "chats": []}
         redis_client.setex(session_token, SESSION_TTL, json.dumps(user_data))
-
+        
         response.set_cookie(
-            key="auth_token",
-            value=session_token,
-            httponly=True,
-            secure=True, 
-            samesite="none",
-            max_age=604800,
-            path="/" 
+            key="auth_token", value=session_token, httponly=True, secure=True, 
+            samesite="none", max_age=604800, path="/" 
         )
-
         return {"status": 200, "message": "Login successful", "token": session_token}
-
-    except HTTPException as e:
-        raise e 
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid Google Token")
     except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # 9. PROTECTED ENDPOINTS
 # ---------------------------------------------------------
 
 @app.get("/verify")
 async def verify(user: dict = Depends(get_current_user)):
-    print(f"DEBUG: User verified: {user['email']}")
     return {"status": 200, "email": user["email"], "name": user["name"], "chats": user["chats"]}
 
 @app.get("/logout")
 async def logout(response: Response, request: Request, user: dict = Depends(get_current_user)):
     token = request.cookies.get("auth_token")
     if token:
-        redis_client.delete(token) # --- REDIS CHANGE ---
-    
+        redis_client.delete(token)
     response.delete_cookie("auth_token")
     return {"status": 200, "message": "Logged out"}
 
 @app.post("/train")
-@limiter.limit("10/minute")  # RESOURCE PROTECTION
-async def train(
-    request: Request,
-    background_tasks: BackgroundTasks, 
-    file: UploadFile = File(...), 
-    user: dict = Depends(get_current_user)
-):
-    # --- 1. FILE SIZE CHECK ---
-    # Check Content-Length header first for speed
+@limiter.limit("10/minute")
+async def train(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     content_length = request.headers.get('content-length')
     if content_length and int(content_length) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(
-            status_code=413, 
-            detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."
-        )
+        raise HTTPException(status_code=413, detail=f"File too large. Max {MAX_FILE_SIZE_MB}MB.")
 
-    # --- 2. LOGIC ---
     original_filename = urllib.parse.unquote(file.filename)
     _, ext = os.path.splitext(original_filename)
-    
     safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename}_{user['email']}{ext}"
     file_path = UPLOAD_DIR / safe_name
     
-    # Save file
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
-        # Double check size after saving (to be 100% sure)
         if file_path.stat().st_size > MAX_FILE_SIZE_BYTES:
             os.remove(file_path)
-            raise HTTPException(
-                status_code=413, 
-                detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."
-            )
-            
+            raise HTTPException(status_code=413, detail="File too large.")
     except Exception as e:
         if file_path.exists(): os.remove(file_path)
-        if isinstance(e, HTTPException): raise e
-        raise HTTPException(status_code=500, detail=f"Upload error: {str(e)}")
-    
-    # Add background task
+        raise e
+
     background_tasks.add_task(process_file_in_background, file_path, file.filename, user['email'])
+    return {"status": "success", "message": "Processing in background."}
 
-    return {
-        "status": "success",
-        "message": "Upload successful! Processing in background.",
-        "filename": file.filename
-    }
-
+# =========================================================
+#  UPDATED /SEND ENDPOINT (VISION-BASED KEYWORDS & CONTEXT)
+# =========================================================
 @app.post("/send")
-@limiter.limit("60/minute")  # CHAT PROTECTION
+@limiter.limit("60/minute") 
 async def send_message(
     request: Request,
     message: Optional[str] = Form(None), 
     file: Optional[UploadFile] = File(None),
     user: dict = Depends(get_current_user)
 ):
+    # 1. Validation
     if not message and not file:
         raise HTTPException(status_code=400, detail="Please provide either a message or a file.")
     msg_text = message.strip() if message else ""
 
+    # 2. FILE PROCESSING (Universal Vision Conversion)
+    # ---------------------------------------------------------
+    accumulated_keywords = []  # To store keywords from all pages
+    final_vision_payloads = [] # To store image URLs for the final prompt
+    
+    if file:
+        # Check size immediately
+        contents = await file.read()
+        if len(contents) > MAX_FILE_SIZE_BYTES:
+             raise HTTPException(status_code=413, detail=f"File too large. Max {MAX_FILE_SIZE_MB}MB.")
+
+        filename = file.filename.lower()
+        temp_path = UPLOAD_DIR / f"temp_chat_{uuid.uuid4()}_{filename}"
+        
+        try:
+            # Save temp file for processing
+            with open(temp_path, "wb") as f:
+                f.write(contents)
+
+            # Process using the Vision Generator
+            # NOTE: We limit to first 3 pages to prevent request timeout during chat
+            MAX_PAGES_TO_SCAN = 3 
+            page_count = 0
+            
+            image_generator = any_to_images(temp_path)
+            
+            for img in image_generator:
+                if page_count >= MAX_PAGES_TO_SCAN:
+                    img.close()
+                    break # Stop processing to save time
+                
+                try:
+                    # 1. Encode Image
+                    base64_image = encode_image(img)
+                    vision_url = f"data:image/jpeg;base64,{base64_image}"
+                    
+                    # 2. Add to Final Context (So AI sees it while answering)
+                    final_vision_payloads.append(vision_url)
+                    
+                    # 3. Extract Keywords (For RAG Search)
+                    # We try 2 times max per page to get keywords
+                    for _ in range(2): 
+                        try:
+                            scout_client = get_next_bot_client()
+                            scout_response = scout_client.chat.completions.create(
+                                model=GROQ_CHAT_MODEL,
+                                messages=[{
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": "Analyze this page. Identify the main scientific topics, formulas, and key terms. Return only a comma-separated list of keywords."},
+                                        {"type": "image_url", "image_url": {"url": vision_url}}
+                                    ]
+                                }],
+                                max_tokens=60  # Short output for speed
+                            )
+                            keywords = scout_response.choices[0].message.content
+                            accumulated_keywords.append(keywords)
+                            break # Success, move to next page
+                        except Exception as e:
+                            print(f"⚠️ Keyword extraction failed on page {page_count}: {e}")
+                            continue
+
+                finally:
+                    # RAM OPTIMIZATION: Close resources immediately
+                    if hasattr(img, 'close'): img.close()
+                    del img
+                    del base64_image
+                    gc.collect() # Force cleanup
+                
+                page_count += 1
+                
+        except Exception as e:
+            print(f"Error processing file for chat: {e}")
+        finally:
+            # Cleanup temp file
+            if temp_path.exists(): os.remove(temp_path)
+
+    # 3. Update Chat History & Redis
     user.setdefault("chats", [])
     user_chats = user.get("chats", [])
     user["chats"].append({"role": "user", "content": message, "document": file.filename if file else None})
-
-    # --- REDIS CHANGE: WRITE BACK USER MSG ---
+    
     token = request.cookies.get("auth_token")
     if token:
         redis_client.setex(token, SESSION_TTL, json.dumps(user))
 
-    # RAG retrieval (PINECONE)
-    context_block = "No documents have been uploaded yet."
+    # 4. RAG RETRIEVAL (Intelligent Search)
+    # ---------------------------------------------------------
+    context_block = "No documents found."
     
-    if msg_text:
+    # Search Query = User Text + All Keywords extracted from images
+    image_search_keywords_str = " ".join(accumulated_keywords)
+    search_query = f"{msg_text} {image_search_keywords_str}"
+
+    if search_query.strip():
         try:
-            query_response = get_embeddings([msg_text])
+            # Limit query length to prevent embedding errors
+            query_response = get_embeddings([search_query[:2000]]) 
             q_emb = query_response[0]['values']
             
-            search_results = index.query(
-                vector=q_emb,
-                top_k=10,
-                include_metadata=True
-            )
-            
+            search_results = index.query(vector=q_emb, top_k=7, include_metadata=True)
             if search_results['matches']:
                 retrieved_texts = [match['metadata']['text'] for match in search_results['matches']]
                 context_block = "\n\n".join(retrieved_texts)
         except Exception as e:
             print(f"Error during RAG retrieval: {e}")
 
-    file_text = "No file attached"
-    if file:
-        contents = await file.read()
-        file_text = f"Filename: {file.filename}, Size: {len(contents)} bytes"
-
+    # 5. PROMPTS
+    # ---------------------------------------------------------
     system_prompt = r"""
     You are an expert Academic Teaching Assistant at NSUT.
     You are basically a RAG (Retrieval-Augmented Generation) bot. TRAINED ON NSUT DOCUMENTS ONLY.
@@ -567,41 +552,69 @@ async def send_message(
     {context_block}
 
     **Student Question:**
-    {message}
+    {msg_text}
 
     **Previous Chat History:**
     {user_chats[-8:]}
 
-    **File Attached:**
-    {file_text}
+    **Attached File Analysis:**
+    I have attached {len(final_vision_payloads)} images representing the document the user uploaded.
+    Use these images to answer the question if relevant.
     """
 
+    # 6. RESPONSE GENERATOR
     async def response_generator():
-        client=get_next_bot_client()
-        stream = client.chat.completions.create(
-            model=GROQ_CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            stream=True
-        )
-        full_response = ""
-        for chunk in stream:
-            content = chunk.choices[0].delta.content
-            if content:
-                full_response += content
-                yield content
+        max_retries = len(valid_bot_clients)
         
-        # --- REDIS CHANGE: WRITE BACK ASSISTANT MSG ---
-        # Unlike dicts, we must manually update Redis
-        user["chats"].append({"role": "assistant", "content": full_response})
-        # We need the token again to save. We can grab it from scope.
-        if token:
-            redis_client.setex(token, SESSION_TTL, json.dumps(user))
+        for attempt in range(max_retries):
+            try:
+                client = get_next_bot_client()
+                
+                # --- CONSTRUCT PAYLOAD ---
+                messages_payload = [{"role": "system", "content": system_prompt}]
+                
+                # Base Content (Text)
+                user_content_list = [{"type": "text", "text": user_prompt}]
+                
+                # Append Vision Payloads (The actual images)
+                for vision_url in final_vision_payloads:
+                    user_content_list.append({
+                        "type": "image_url", 
+                        "image_url": {"url": vision_url}
+                    })
+
+                messages_payload.append({
+                    "role": "user",
+                    "content": user_content_list
+                })
+
+                stream = client.chat.completions.create(
+                    model=GROQ_CHAT_MODEL, 
+                    messages=messages_payload,
+                    temperature=0.3,
+                    stream=True
+                )
+                
+                full_response = ""
+                for chunk in stream:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        full_response += content
+                        yield content
+                
+                # Write back assistant msg
+                user["chats"].append({"role": "assistant", "content": full_response})
+                if token:
+                    redis_client.setex(token, SESSION_TTL, json.dumps(user))
+                return 
+
+            except Exception as e:
+                print(f"⚠️ Key failed (Attempt {attempt+1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    yield f"\n\n[System Error] All AI models are currently unavailable. Please contact support."
 
     return StreamingResponse(response_generator(), media_type="text/plain")
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
