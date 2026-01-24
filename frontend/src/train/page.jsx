@@ -76,6 +76,14 @@ function Train() {
           message: 'File is too large! Please upload a file smaller than 10MB.' 
         });
         setSelectedFile(null);
+      }
+      else if (response.status === 429) {
+        // Handle File Size Limit
+        setStatus({ 
+          type: 'error', 
+          message: 'Too many requests! Try again later.' 
+        });
+        setSelectedFile(null);
       }else {
         setSelectedFile(null);
         throw new Error('Upload failed on server.');
