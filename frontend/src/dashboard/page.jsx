@@ -7,7 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import {
   Loader2, LogOut, Github, BrainCircuit, Bot, User, Menu, Plus, 
-  AlertCircle, CheckCircle, FileText // <--- Added AlertCircle & CheckCircle
+  AlertCircle, CheckCircle, FileText, Image as ImageIcon // Added ImageIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
@@ -22,8 +22,6 @@ function DashboardPage() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  
-  // --- NEW: Status State for Error Messages ---
   const [status, setStatus] = useState({ message: '', type: '' });
 
   const messagesEndRef = useRef(null);
@@ -54,10 +52,9 @@ function DashboardPage() {
     }
   }, [input]);
 
-  // --- Helper to clear status automatically ---
   const showStatus = (msg, type) => {
     setStatus({ message: msg, type: type });
-    setTimeout(() => setStatus({ message: '', type: '' }), 4000); // Hide after 4s
+    setTimeout(() => setStatus({ message: '', type: '' }), 4000);
   };
 
   const preprocessLaTeX = (content) => {
@@ -85,12 +82,38 @@ function DashboardPage() {
     }
   }
 
+  // --- MODIFIED: Restrict to Images Only ---
   function handleFileSelect(e) {
     if (e.target.files[0]) {
-        setFile(e.target.files[0]);
-        setStatus({ message: '', type: '' }); // Clear any previous errors
+        const selectedFile = e.target.files[0];
+        
+        // Strict Check: Must be an image
+        if (!selectedFile.type.startsWith('image/')) {
+            showStatus("Only image files (JPG, PNG, WEBP) are allowed.", "error");
+            e.target.value = ""; // Reset input
+            return;
+        }
+
+        setFile(selectedFile);
+        setStatus({ message: '', type: '' });
     }
   }
+
+  // --- Handle Paste (Ctrl+V) ---
+  const handlePaste = (e) => {
+    const items = e.clipboardData.items;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        e.preventDefault(); 
+        const blob = items[i].getAsFile();
+        const file = new File([blob], "screenshot.png", { type: blob.type });
+        setFile(file);
+        setStatus({ message: 'Screenshot attached!', type: 'success' });
+        setTimeout(() => setStatus({ message: '', type: '' }), 3000);
+        return; 
+      }
+    }
+  };
 
   async function deleteCookies() {
     try {
@@ -108,9 +131,8 @@ function DashboardPage() {
     setInput('');
     setFile(null);
     setSending(true);
-    setStatus({ message: '', type: '' }); // Clear previous errors
+    setStatus({ message: '', type: '' });
 
-    // Optimistic UI Update
     setMessages(prev => [...prev, { role: 'user', content: currentInput, document: currentFile ? currentFile.name : null }]);
 
     try {
@@ -124,12 +146,8 @@ function DashboardPage() {
         body: formData,
       });
 
-      // --- NEW: Handle 413 File Too Large specifically ---
       if (response.status === 413) {
         showStatus("File too large. Maximum size is 10MB.", "error");
-        
-        // Optional: Remove the failed message from UI or mark it as failed
-        // For now, we just stop the loading spinner
         setSending(false); 
         return; 
       }
@@ -165,7 +183,6 @@ function DashboardPage() {
       }
     } catch (error) {
       console.error("Streaming error:", error);
-      // Only show error bubble if it wasn't a handled UI error (like 413)
       if (status.type !== 'error') {
           setMessages(prev => [...prev, { role: 'model', content: '**Error:** Connection failed.' }]);
       }
@@ -249,7 +266,6 @@ function DashboardPage() {
       {/* Main Chat Area */}
       <main className="chat-area">
 
-        {/* Scrollable Messages Region */}
         <div className="messages-scroll-area">
           {messages.length === 0 ? (
             <div className="empty-state">
@@ -271,7 +287,8 @@ function DashboardPage() {
                         display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px',
                         padding: '8px', background: 'rgba(0, 0, 0, 0.2)', borderRadius: '6px', fontSize: '0.85rem'
                       }}>
-                        <FileText size={16} />
+                        {/* Use Image Icon instead of FileText for images */}
+                        <ImageIcon size={16} />
                         <span style={{ fontWeight: 500 }}>{msg.document}</span>
                       </div>
                     )}
@@ -304,10 +321,9 @@ function DashboardPage() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input Region - Fixed to Bottom */}
+        {/* Input Region */}
         <div className="input-area">
           
-          {/* --- NEW: Floating Error Message Animation --- */}
           <AnimatePresence>
             {status.message && (
               <motion.div 
@@ -315,7 +331,7 @@ function DashboardPage() {
                 animate={{ opacity: 1, y: 0, height: 'auto' }}
                 exit={{ opacity: 0, y: 10, height: 0 }}
                 style={{ marginBottom: '10px' }}
-                className={`status-message ${status.type}`} // Make sure you have .error css in style.css
+                className={`status-message ${status.type}`}
               >
                 {status.type === 'success' ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
                 <span>{status.message}</span>
@@ -330,7 +346,7 @@ function DashboardPage() {
                 background: "#1e293b", border: "1px solid rgba(255,255,255,0.1)",
                 padding: "6px 12px", borderRadius: "99px", fontSize: "0.85rem"
               }}>
-                <span>📎 {file.name}</span>
+                <span>📷 {file.name}</span>
                 <button
                   onClick={() => setFile(null)}
                   style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", marginLeft: "4px" }}
@@ -345,13 +361,14 @@ function DashboardPage() {
               ref={fileInputRef}
               style={{ display: "none" }}
               onChange={handleFileSelect}
+              accept="image/*" // <--- RESTRICT SYSTEM PICKER TO IMAGES ONLY
             />
 
             <button
               className="attach-btn"
               type="button"
               onClick={() => fileInputRef.current.click()}
-              title="Attach file"
+              title="Attach Image"
             >
               <Plus size={20} />
             </button>
@@ -361,7 +378,8 @@ function DashboardPage() {
               className="chat-input"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask a question..."
+              onPaste={handlePaste}
+              placeholder="Ask a question (Ctrl+V to paste screenshot)"
               onKeyDown={handleKeyDown}
               disabled={sending}
               autoFocus
