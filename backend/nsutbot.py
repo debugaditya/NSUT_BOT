@@ -256,6 +256,9 @@ async def send_message(
     - **Diagrams:** Use `mermaid` code blocks for processes.
     - **Tables:** Use Markdown tables.
     - **Visuals:** Insert
+    - Dont tell user about formatting rules or technology you are using like latex or mermaid. these are only for rendering purpose.
+    - GIVE answers to user only related to the query asked. 
+    - Also take care of the previous messages while answering.
     
     
     
