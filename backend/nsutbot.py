@@ -85,7 +85,7 @@ def get_current_user(request: Request, response: Response):
 @app.get("/")
 def root(): return {"status": "NSUT Bot Backend is Live"}
 
-@app.get("/health")
+@app.head("/health")
 def health(): return {"status": "healthy"}
 
 @app.post("/login")
