@@ -240,7 +240,7 @@ async def send_message(
     read the previous messages to maintain context.
     give first priority to the qstn user asked and previous_messages while answering.
     then u can use context_block to find desired data if needed.
-    If the answer is not in context_block, then you can reply on the basis of your own knowledge.
+    If the answer is not in context_block, Strictly say I cant answer this on the basis of the context provided.
     file_attached contains the file student has attached, if it is not empty then analyze that file also and answer accordingly.
     Your goal is to answer student questions with high technical precision, using ONLY the provided Context.
 
