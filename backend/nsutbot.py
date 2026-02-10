@@ -235,7 +235,7 @@ async def send_message(
     You are basically a RAG (Retrieval-Augmented Generation) bot. TRAINED ON NSUT DOCUMENTS ONLY.
     You have to reply as if you are talking to the student directly.
     context_block contains the data available from the documents we have in our vector db.
-    if context_block is not related to the question, you can ignore it and answer on your own knowledge.
+    if context_block is not related to the question, just say it is not in my context.
     previous_messages contains the earlier chat history with the student.
     read the previous messages to maintain context.
     give first priority to the qstn user asked and previous_messages while answering.
