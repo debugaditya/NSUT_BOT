@@ -6,6 +6,7 @@ import Train from './train/page.jsx'
 import './index.css'
 import { BrowserRouter, Routes, Route } from 'react-router-dom' // 👈 Import Routes & Route
 import { GoogleOAuthProvider } from '@react-oauth/google'
+import { Analytics } from '@vercel/analytics/react'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -17,6 +18,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
           <Route path="/train" element={<Train />} />
         </Routes>
       </BrowserRouter>
+      <Analytics />
     </GoogleOAuthProvider>
   </React.StrictMode>,
 )
