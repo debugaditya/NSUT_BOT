@@ -24,6 +24,7 @@ celery_app = Celery("worker")
 celery_app.conf.update(
     broker_url=REDIS_URL,
     result_backend=REDIS_URL,
+    broker_heartbeat=20,
     broker_use_ssl={
         "ssl_cert_reqs": ssl.CERT_NONE
     },
