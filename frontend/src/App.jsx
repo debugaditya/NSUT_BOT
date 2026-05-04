@@ -182,7 +182,7 @@ function App() {
               transition={{ delay: 0.8 }}
               style={{ marginTop: '2.5rem', fontSize: '0.75rem', color: '#94a3b8' }}
             >
-              Restricted to @nsut.ac.in domain
+              &copy; 2026 NSUT Bot. All rights reserved.
             </motion.div>
 
           </motion.div>
