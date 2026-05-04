@@ -56,7 +56,7 @@ function App() {
         navigate('/dashboard');
       } else {
         const data = await response.json();
-        if (response.status === 402) {
+        if (response.status === 402 || response.status === 500) {
           alert(data.detail || 'Sign in with NSUT mail ID');
         } else {
           console.error('Login Failed:', data);
