@@ -70,7 +70,7 @@ def get_next_bot_client():
     return selected_bot
 
 md_converter = MarkItDown()
-GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
 def chunk_text(text: str, size: int = 500, overlap: int = 50) -> Generator[str, None, None]:
     words = text.split()
