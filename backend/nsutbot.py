@@ -35,7 +35,7 @@ MAX_FILE_SIZE_MB = 10
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
-GROQ_CHAT_MODEL ="meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_CHAT_MODEL ="qwen/qwen3.6-27b"
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
